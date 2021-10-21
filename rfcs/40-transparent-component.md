@@ -1,4 +1,4 @@
-# Feature Name: `transparent-component`
+# Feature Name: `transparent-component` (WIP)
 
 ## Summary
 
@@ -22,7 +22,7 @@ Explain the proposal as if it was already included in the engine and you were te
 
 ## Implementation strategy
 
-### Basic ECS-level changes necessary
+### Necessary ECS-level changes
 
 The fundamental change made by this RFC is adding new associated type `QueryItem` (name can be bikeshedded) to the `Component` trait. All sites which provide access to the value of a component `C` will be updated to return `C::QueryItem` rather than `C` itself. An exhaustive list of such sites appears to be:
 - `EntityRef::get`
@@ -40,7 +40,7 @@ A naive implementation would attempt to implement this RFC's ECS-level changes b
 - Alter the implementation of the change-detection smart pointer `Mut<T>` so that `<Mut<T> as Deref>::Target = T::QueryItem` rather than `T`. This permits us to leave `WriteFetch` alone, since its `Item` associated type is already `Mut<T>`.
 - Alter the signature of `EntityRef::get::<T>` and `World::get::<T>` (which is implemented in terms of the former) to return `T::QueryItem`.
 
-Unfortunately, the simplicity of this implementation comes at an unacceptable price. Previously, this code would compile:
+Unfortunately, the simplicity of this implementation comes at a significant price. Previously, this code would compile:
 ```rust
 #[derive(Component)]
 struct Foo;
@@ -49,22 +49,27 @@ fn set_foo(world: &World, entity: Entity, foo: Foo) {
     *world.get_mut(entity).unwrap() = Foo;
 }
 ```
-The full signature of `World::get_mut` is `World::get_mut<T: Component>(&mut self, entity: E) -> Option<Mut<T>>`, so there is an inferred generic parameter here. However, if that signature remains unchanged while the `DerefMut` target type of `Mut<T>` becomes `T::QueryItem`, then Rust is no longer capable of inferring this generic parameter, as the type inference algorithm will not attempt to deduce a generic parameter knowing only an associated type of that parameter. This would force *all* uses of `World::get_mut` and similar, whether with a transparent component or otherwise, to explicitly specify the `Component` type with a turbofish. This is considered ergonomically unacceptable. 
+The full signature of `World::get_mut` is `World::get_mut<T: Component>(&mut self, entity: E) -> Option<Mut<T>>`, so there is an inferred generic parameter here. However, if that signature remains unchanged while the `DerefMut` target type of `Mut<T>` becomes `T::QueryItem`, then Rust is no longer capable of inferring this generic parameter, as the type inference algorithm will not attempt to deduce a generic parameter knowing only an associated type of that parameter. This would force *all* uses of `World::get_mut` and similar, whether with a transparent component or otherwise, to explicitly specify the `Component` type with a turbofish. This is considered an unacceptable ergonomic loss. 
 
-In order to preserve type inference, `Mut<T>`'s `Deref` impl will *not* perform the conversion from `T` to `T::QueryItem`. Instead, it will be made possible (TODO: how?) to construct a `Mut<T::QueryItem>` directly from storage for `T`. The methods `get` and `get_mut` on `World`, `EntityRef`, and `EntityMut` will be changed from inherent methods to trait methods from traits `GetEntityComponent<T, Q>`, `GetComponent<T, Q>`, `GetComponentMut<T, Q>`. 
-
-```
-pub trait ComponentAccess<T, Q> where T: Component<QueryItem=Q> {
+In order to preserve type inference, `Mut<T>`'s `Deref` impl will *not* perform the conversion from `T` to `T::QueryItem`. Instead, it will be made possible (TODO: how?) to construct a `Mut<T::QueryItem>` directly from storage for `T`. A new trait will be introduced:
+```rust
+pub trait ComponentAccess<T, Q> /* TODO: where T: Component<QueryItem=Q>? */ {
     // TODO
 }
 ```
-Each invocation of the `#[derive(Component)]` macro on a type `T` will generate an appropriate `impl ComponentAccess<T, T::QueryItem> for World`. 
-
-TODO
+The methods `get` and `get_mut` on `World`, `EntityRef`, and `EntityMut` will be changed to have take two type parameters `T` and `Q`, and require `World: ComponentAccess<T, Q>`, for example:
+```rust
+impl EntityMut {
+    fn get_mut<C, Q>(&mut self) -> Option<Mut<Q>> where World: ComponentAccess<C, Q> { ... }
+}
+```
+Each invocation of the `#[derive(Component)]` macro on a type `T` will generate an appropriate `impl ComponentAccess<T, T::QueryItem> for World`, permitting the `World::get_mut` method to function with that component type. Type inference for these methods will also function, because if all impls of `ComponentAccess<_, U>` are concrete (i.e. not blanket over `U`) and there is a unique `T` such that `World: ComponentAccess<T, U>`, Rust is capable of inferring that `T`. 
 
 ## Drawbacks
 
-Why should we *not* do this?
+- Anyone not using `#[derive(Component)]` will have to write the `ComponentAccess` impl themself (but, do we care about this use-case?)
+- An adversarial crate could write a blanket `impl<T> ComponentAccess<MyType, T>` and break type inference for any project that uses it. I'm not entirely convinced this is a real problem (who would use that crate?), but we could prevent it by having `trait ComponentAccess<T, Q> where T: Component<QueryItem=Q>`. However, due to the lack of implied bounds outside of supertraits, this would inflate every `World: ComponentAccess<C, Q>` bound to `World: ComponentAccess<C, Q>, T: Component<QueryItem=Q>`. 
+- **While now `World::get` and family work seamlessly for any concrete component type, you can no longer use them if you only have T: Component** (since you need `World: ComponentAccess<T, T::QueryItem>`) This could also be worked around if we had implied bounds, but not at the same time as the above drawback (as that would introduce cyclic trait obligations).
 
 ## Rationale and alternatives
 
@@ -94,15 +99,4 @@ Note that while precedent set by other engines is some motivation, it does not o
 
 ## \[Optional\] Future possibilities
 
-Think about what the natural extension and evolution of your proposal would
-be and how it would affect Bevy as a whole in a holistic way.
-Try to use this section as a tool to more fully consider other possible
-interactions with the engine in your proposal.
-
-This is also a good place to "dump ideas", if they are out of scope for the
-RFC you are writing but otherwise related.
-
-Note that having something written down in the future-possibilities section
-is not a reason to accept the current or a future RFC; such notes should be
-in the section on motivation or rationale in this or subsequent RFCs.
-If a feature or change has no direct value on its own, expand your RFC to include the first valuable feature that would build on it.
+If `#[derive(Resource)]` becomes a thing, we may want to support an analogous feature of 'transparent resources.'
