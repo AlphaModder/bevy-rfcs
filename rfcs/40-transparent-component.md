@@ -58,7 +58,7 @@ In order to preserve type inference, we must ensure that the type variable which
 ```rust
 fn get_mut<T: Component, U: AsComponent<T>>(&mut self, entity: E) -> Option<Mut<U>>
 ```
-We will get to the precise definition of `AsComponent` later, but an implementation of `AsComponent<C> for T` should be understood to mean "the type `T`" can be read from ECS storage labeled by the component `C`. Thus, now when using `get_mut`, you must now provide two pieces of information: the component whose data you would like to read from ECS storage (`T`), and *how* (i.e. as what type) you would like to read it. Introducing an additional variable may sound like it would only make the situation with inference worse, but in fact the type inference algorithm is far less conservative in this case. In particular, if `U` is known, and there is only one implementation of `AsComponent` for `U`, the compiler will happily deduce that `T` is this impl's generic. (This also works backwards in most cases.) This property allows the `fn set_foo` written to compile without changes.
+We will get to the precise definition of `AsComponent` later, but an implementation of `AsComponent<C> for T` should be understood to mean "the type `T`" can be read from ECS storage labeled by the component `C`. Thus, now when using `get_mut`, you must now provide two pieces of information: the component whose data you would like to read from ECS storage (`T`), and *how* (i.e. as what type) you would like to read it. Introducing an additional variable may sound like it would only make the situation with inference worse, but in fact the type inference algorithm is far less conservative in this case. In particular, if `U` is known, and there is only one implementation of `AsComponent` for `U`, the compiler will happily deduce that `T` is this impl's generic. This property allows the `fn set_foo` written to compile without changes.
 
 ### The `AsComponent` trait
 The trait `AsComponent` is defined as follows:
@@ -72,12 +72,37 @@ As previously stated, an implementation of `AsComponent<C> for T` should be unde
 
 There will be a blanket `impl<T: Component> AsComponent<T> for T`, encoding the fact that all components can be read from ECS storage as themself. Note that this impl cannot be changed to `impl<T: Component> AsComponent<T> for T::QueryItem`, because this would again require type inference to search for a `T` with only knowledge of one of its associated types. Such an impl is also useful in its own right: the lack of injectivity between component 'labels' and component value types could complicate certain code that is generic over a type implementing `Component`. With the above impl, such code can choose to access components in a way that does preserve injectivity when using `World::get_mut` or similar methods. Additionally, the blanket impl ensures that users who write their own `Component` impls do not have to additionally write `impl AsComponent<MyComponent> for MyComponent`, a small ergonomic win. Finally, it also prevents downstream crates from adding impls like `impl<T: Component> AsComponent<MyType> for T`, which would otherwise break type inference for all component types when in scope. 
 
+TODO: Describe conceptual shift in *what* is being inferred here. 
+
 ### Changes to procedural macros
 TODO: Describe how to implement changes to procedural macros
 
-### Preserving type inference even better
+### Full call-site backwards compatibility
 
-TODO: Describe three-trait solution for perfectly backwards-compatible method calls
+Prior to this RFC, there were essentially three kinds of usage of `World::get_mut` and similar methods.
+1. Usages like `world.get_mut(entity)` where explicitly-specified type parameters are unnecessary because the component type can be inferred from the expected return type of `get_mut`. For example:
+    ```rust
+    let comp: &mut MyComponent = world.get_mut(entity);
+    ```
+2. Usages of `world.get_mut::<T>(entity)` where the type parameter `T` is provided only for clarity but could be inferred. For example:
+    ```rust
+    if world.get_mut::<MyComponent>() == MyComponent::Variant1 { /* ... */ }
+    ```
+3. Usages of `world.get_mut::<T>(entity)` where the explicit type parameter `T` is used by inference to determine the type of an expression containing `get_mut` or the variable it is assigned to. For example:
+    ```rust
+    let component = world.get_mut::<T>(entity);
+    component.do_something();
+    ```
+
+Using the above strategy involving the `AsComponent` trait, we ensure that all usages of the first kind continue to function unchanged (TODO: with the caveat of conceptual shift described above). Because this strategy introduces an additional type parameter to `World::get_mut`, usages of the second kind would need to become `world.get_mut::<T, _>(entity)`, but otherwise remain precisely equivalent to their original form. On the other hand, usages of the third kind would, perhaps counterintuitively, need to become `world.get_mut::<_, T>` because *the return type cannot be inferred from context*, and so it is the type parameter corresponding to the inner type and not the component type that must be specified.
+
+It *is* possible to allow usages of the form `world.get_mut::<T>` to continue functioning unchanged. A method cannot be called with fewer than its required number of type parameters, even if the rest can be inferred from context. However, if a method comes from a generic trait, the trait's type parameters can be inferred or specified independently of whether the method's type parameters are. The `T: Component` parameters of `World::{get, get_mut}`, `{EntityRef, EntityMut}::{get, get_unchecked_mut}`, and `EntityMut::get_mut` could be lifted onto three new traits `WorldGet<T: Component>`, `EntityRefGet<T: Component>`, and `EntityMutGet<T: Component>`, allowing these methods to retain their single type parameter. This ensures all previous usages of such methods compile without change. 
+
+Once again however, there is no free lunch. Strictly, employing this solution changes the meaning of usages of the second kind: the user will no longer be specifying the component label `T: Component`, but the component type `U: AsComponent<T>`. Additionally, if these traits were introduced in a situation where *both* type parameters must be specified (which can happen if the same type is wrapped by two different `Component` types), in general the user would have to resort to the rather painful:
+```rust
+<World as WorldGet<T>::get_mut::<U>(&mut world, entity)
+```
+Whereas if `get_mut` and similar were just inherent methods, this scenario only calls for the much saner `world.get_mut::<T, U>(entity)`. Thus, it not clear whether moving these methods onto traits is an overall ergonomic win. 
 
 ## Drawbacks
 
